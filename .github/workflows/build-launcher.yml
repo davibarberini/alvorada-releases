@@ -57,7 +57,7 @@ jobs:
         working-directory: app
         shell: pwsh
         run: |
-          $assets = @(Get-ChildItem release -File | Where-Object { $_.Name -match '\.(exe|blockmap|yml)$' } | ForEach-Object { $_.FullName })
+          $assets = @(Get-ChildItem release -File | Where-Object { $_.Name -match '\.(exe|blockmap)$' -or $_.Name -eq 'latest.yml' } | ForEach-Object { $_.FullName })
           if ($assets.Count -lt 3) { throw 'Missing update artifacts' }
           gh release upload $env:RELEASE_TAG @assets qa/windows-result.json --repo $env:GITHUB_REPOSITORY --clobber
           if ($LASTEXITCODE -ne 0) { throw 'Upload failed' }
