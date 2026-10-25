@@ -6,6 +6,13 @@ on:
       tag:
         description: Draft release tag (vX.Y.Z)
         required: true
+      kind:
+        description: launcher or game
+        required: true
+        default: launcher
+      baseline:
+        description: Published installer baseline version
+        required: true
       sha256:
         description: SHA256 of the prepared build-input.zip
         required: true
@@ -20,6 +27,8 @@ jobs:
     timeout-minutes: 35
     env:
       GH_TOKEN: ${{ github.token }}
+      RELEASE_KIND: ${{ inputs.kind }}
+      BASELINE_VERSION: ${{ inputs.baseline }}
       RELEASE_TAG: ${{ inputs.tag }}
       INPUT_SHA256: ${{ inputs.sha256 }}
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
@@ -27,8 +36,10 @@ jobs:
       - name: Validate and download the draft input
         shell: pwsh
         run: |
-          if ($env:RELEASE_TAG -notmatch '^v\d+\.\d+\.\d+$') { throw 'Invalid tag' }
+          if ($env:RELEASE_TAG -notmatch '^(game-)?v\d+\.\d+\.\d+$') { throw 'Invalid tag' }
           if ($env:INPUT_SHA256 -notmatch '^[a-f0-9]{64}$') { throw 'Invalid digest' }
+          if ($env:RELEASE_KIND -notin @('launcher','game')) { throw 'Invalid kind' }
+          if ($env:BASELINE_VERSION -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid baseline' }
           $draft = gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json isDraft --jq .isDraft
           if ($LASTEXITCODE -ne 0 -or $draft -ne 'true') { throw 'Release must be a draft' }
           gh release download $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --pattern build-input.zip --dir input
@@ -36,7 +47,9 @@ jobs:
           if ((Get-FileHash input/build-input.zip -Algorithm SHA256).Hash.ToLower() -ne $env:INPUT_SHA256) { throw 'Input checksum mismatch' }
           Expand-Archive input/build-input.zip app
           $version = (Get-Content app/package.json | ConvertFrom-Json).version
-          if ("v$version" -ne $env:RELEASE_TAG) { throw 'Version mismatch' }
+          $expected = "v$version"
+          if ($env:RELEASE_KIND -eq 'game') { $expected = "game-v$((Get-Content app/game-version.json | ConvertFrom-Json).version)" }
+          if ($expected -ne $env:RELEASE_TAG) { throw 'Version mismatch' }
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -48,18 +61,27 @@ jobs:
         working-directory: app
         run: pnpm install --frozen-lockfile
       - name: Build Windows installer
+        if: inputs.kind == 'launcher'
         working-directory: app
         run: pnpm exec electron-builder --config builder.json --win nsis --x64 --publish never
       - name: Validate install and real update download
+        if: inputs.kind == 'launcher'
         working-directory: app
         run: pnpm exec node qa/windows-smoke.cjs
-      - name: Upload installer, update metadata and evidence to the draft
+      - name: Validate signed content updates without restart
+        working-directory: app
+        run: pnpm exec node qa/game-smoke.cjs
+      - name: Upload installer, content and evidence to the draft
         working-directory: app
         shell: pwsh
         run: |
-          $assets = @(Get-ChildItem release -File | Where-Object { $_.Name -match '\.(exe|blockmap)$' -or $_.Name -eq 'latest.yml' } | ForEach-Object { $_.FullName })
-          if ($assets.Count -lt 3) { throw 'Missing update artifacts' }
-          gh release upload $env:RELEASE_TAG @assets qa/windows-result.json --repo $env:GITHUB_REPOSITORY --clobber
+          $assets = @('content-update/game-manifest.json','content-update/game-content.gz','qa/game-result.json')
+          if ($env:RELEASE_KIND -eq 'launcher') {
+          $installerAssets = @(Get-ChildItem release -File | Where-Object { $_.Name -match '\.(exe|blockmap)$' -or $_.Name -eq 'latest.yml' } | ForEach-Object { $_.FullName })
+          if ($installerAssets.Count -lt 3) { throw 'Missing update artifacts' }
+          $assets += $installerAssets + @('qa/windows-result.json')
+          }
+          gh release upload $env:RELEASE_TAG @assets --repo $env:GITHUB_REPOSITORY --clobber
           if ($LASTEXITCODE -ne 0) { throw 'Upload failed' }
       - uses: actions/upload-artifact@v4
         if: always()
